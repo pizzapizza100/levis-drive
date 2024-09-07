@@ -1,0 +1,5 @@
+# Ignore VS Code settings folder
+.vscode/
+
+# Ignore Rust target directory
+/target/
