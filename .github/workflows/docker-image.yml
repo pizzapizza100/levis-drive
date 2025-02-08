@@ -1,0 +1,37 @@
+name: Build and Push Docker Image
+
+# This will trigger the workflow when pushing to the master or the dev branches.
+on:
+  push:
+    branches:
+      - master
+      - dev
+
+# Define the jobs (steps) to be run on GitHub Actions
+jobs:
+  build:
+    runs-on: ubuntu-latest  # Specifies the runner environment to use
+    
+    steps:
+    # Step 1: Check out the code from the repository
+    - name: Checkout code
+      uses: actions/checkout@v2
+    
+    # Step 2: Set up Docker Buildx (needed for multi-platform builds)
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    # Step 3: Log in to GitHub Container Registry using the GitHub token
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v2
+      with:
+        username: ${{ github.actor }}  # GitHub username of the current actor
+        password: ${{ secrets.GITHUB_TOKEN }}  # GitHub token stored securely in the repository secrets
+    
+    # Step 4: Build the Docker image
+    - name: Build Docker image
+      run: docker build -t ghcr.io/${{ github.repository }}/levisdrive:latest .
+    
+    # Step 5: Push the Docker image to GitHub Container Registry
+    - name: Push Docker image to GitHub Container Registry
+      run: docker push ghcr.io/${{ github.repository }}/levisdrive:latest
