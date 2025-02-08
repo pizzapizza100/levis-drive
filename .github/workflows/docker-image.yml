@@ -37,7 +37,7 @@ jobs:
       run: echo ${{ github.repository }}
 
     - name: Run simple test
-      run: docker run --rm test-image:latest
+      run: docker run --rm levisdrive:latest
     
     # Step 5: Push the Docker image to GitHub Container Registry
     - name: Push Docker image to GitHub Container Registry
