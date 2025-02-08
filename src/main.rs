@@ -1,6 +1,7 @@
 // main.rs
 
 use log::{debug, error, info, warn};
+use std::process;
 
 fn main() {
     std::env::set_var("RUST_LOG", "debug");
@@ -10,6 +11,8 @@ fn main() {
     info!("This is an info message");
     warn!("This is an warning message");
     error!("This is an error message");
+
+    process::exit(0);
 }
 
 #[test]
