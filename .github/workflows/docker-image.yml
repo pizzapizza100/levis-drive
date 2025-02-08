@@ -25,12 +25,13 @@ jobs:
     - name: Log in to GitHub Container Registry
       uses: docker/login-action@v2
       with:
+        registry: ghcr.io
         username: ${{ github.actor }}  # GitHub username of the current actor
         password: ${{ secrets.GITHUB_TOKEN }}  # GitHub token stored securely in the repository secrets
     
     # Step 4: Build the Docker image
     - name: Build Docker image
-      run: docker build -t ghcr.io/${{ github.repository }}/levisdrive:latest .
+      run: docker buildx build -t ghcr.io/${{ github.repository }}/levisdrive:latest .
 
     - name: Run simple test
       run: docker run --rm test-image:latest
