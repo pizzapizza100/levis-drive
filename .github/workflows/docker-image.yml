@@ -31,7 +31,7 @@ jobs:
     
     # Step 4: Build the Docker image
     - name: Build Docker image
-      run: docker buildx build -t ghcr.io/${{ github.repository }}/levisdrive:latest .
+      run: docker buildx build -t ghcr.io/${{ github.repository_owner }}/levis-drive/levisdrive:latest .
     
     # Step 5: Push the Docker image to GitHub Container Registry
     - name: Push Docker image to GitHub Container Registry
