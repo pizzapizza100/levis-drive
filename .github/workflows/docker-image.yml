@@ -32,13 +32,13 @@ jobs:
     # Step 4: Build the Docker image
     - name: Build Docker image
       run: docker buildx build -t ghcr.io/${{ github.repository }}/levisdrive:latest .
-
-    - name: Print GitHub Repository
-      run: echo ${{ github.repository }}
-
-    - name: Run simple test
-      run: docker run --rm ghcr.io/${{ github.repository }}/levisdrive:latest
     
     # Step 5: Push the Docker image to GitHub Container Registry
     - name: Push Docker image to GitHub Container Registry
       run: docker push ghcr.io/${{ github.repository }}/levisdrive:latest
+
+    - name: Run simple test
+      run: docker run --rm ghcr.io/${{ github.repository }}/levisdrive:latest
+
+    - name: Print GitHub Repository
+      run: echo ${{ github.repository }}
