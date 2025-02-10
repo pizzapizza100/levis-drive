@@ -3,3 +3,5 @@
 
 # Ignore Rust target directory
 /target/
+
+secrets/
