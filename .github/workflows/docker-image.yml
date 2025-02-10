@@ -32,7 +32,7 @@ jobs:
     # Build and load the image into the local Docker daemon
     - name: Build and Push Multi-Platform Docker Image
       # run: docker buildx build --platform linux/amd64,linux/arm64 --push -t ghcr.io/${{ github.repository }}/levisdrive:latest .
-      run: docker buildx build --push -t ghcr.io/LevisCodeStudio/levis-drive/levisdrive:latest .
+      run: docker buildx build --push -t ghcr.io/leviscodestudio/levis-drive/levisdrive:latest .
 
   test:
     runs-on: ubuntu-latest
@@ -47,4 +47,4 @@ jobs:
 
       # Run a simple test
      - name: Run simple test
-       run: docker run --rm ghcr.io/LevisCodeStudio/levis-drive/levisdrive:latest
+       run: docker run --rm ghcr.io/leviscodestudio/levis-drive/levisdrive:latest
