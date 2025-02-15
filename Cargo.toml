@@ -1,11 +1,14 @@
 [package]
-name = "LevisDrive"
+name = "levis_drive"
 version = "0.1.0"
 edition = "2021"
 
+# cspell:ignore reqwest
 [dependencies]
 log = "0.4"
 env_logger = "0.11"
+reqwest = { version = "0.11", features = ["blocking"] }
 
+# cspell:ignore debuginfo
 [profile.release]
 strip = "debuginfo"

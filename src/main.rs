@@ -1,21 +1,25 @@
-// main.rs
+use log::debug;
+use reqwest::blocking::get;
+use reqwest::Error;
 
-use log::{debug, error, info, warn};
-use std::process;
+fn get_router_public_ip() -> Result<String, Error> {
+    let response = get("https://api.ipify.org")?.text()?;
 
-fn main() {
-    std::env::set_var("RUST_LOG", "debug");
-    env_logger::init(); // Initialize the logger implementation
+    debug!("Public IP is: {}", response);
 
-    debug!("This is a debug message");
-    info!("This is an info message");
-    warn!("This is an warning message");
-    error!("This is an error message");
-
-    process::exit(0);
+    Ok(response)
 }
 
-#[test]
-fn always_pass_test() {
-    assert_eq!(1, 1);
+fn init_logger() {
+    std::env::set_var("RUST_LOG", "debug");
+    env_logger::init(); // Initialize the logger implementation
+}
+
+fn main() -> Result<(), Error> {
+    init_logger();
+
+    // Send a request to an external service to get the public IP
+    get_router_public_ip().unwrap();
+
+    Ok(())
 }
