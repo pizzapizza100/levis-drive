@@ -1,8 +1,8 @@
 use log::debug;
 use reqwest::blocking::get;
-use reqwest::Error;
 use std::env;
 use std::net::ToSocketAddrs;
+mod drive_error;
 
 const DUCK_DNS_URL: &str = "https://www.duckdns.org/";
 const LEVIS_DRIVE_DNS: &str = "levis-drive";

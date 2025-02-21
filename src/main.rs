@@ -193,7 +193,7 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error 
     Ok(())
 }
 
-fn keep_posted_ip_valid() {
+async fn keep_posted_ip_valid() {
     loop {
         let router_public_ip = match posted_ip::get_router_public_ip() {
             Ok(data) => data,
@@ -229,11 +229,12 @@ fn keep_posted_ip_valid() {
     }
 }
 
-fn main() -> Result<(), Error> {
+#[tokio::main]
+async fn main() -> Result<(), Error> {
     dotenv().ok();
     env_logger::init(); // Initialize the logger implementation
 
-    thread::spawn(|| keep_posted_ip_valid);
+    tokio::spawn(keep_posted_ip_valid());
 
     let listener = TcpListener::bind("0.0.0.0:1000").expect("Failed to bind port");
     println!("Listening on port 1000...");

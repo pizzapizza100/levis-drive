@@ -6,10 +6,10 @@ use std::fs;
 use std::io;
 use std::io::{BufReader, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
-use std::process::Command;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
+use tokio::io::AsyncWriteExt;
 
 pub struct Session {
     pub is_authenticated: bool,
@@ -30,7 +30,7 @@ impl Session {
         }
     }
 
-    pub fn handle_user(&mut self, username: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn handle_user(&mut self, username: &str) -> Result<(), Box<dyn std::error::Error>> {
         if username == "admin" || username == "anonymous" {
             self.username = Some("admin".to_string());
             debug!("Valid username, Sending \"331 User name okay, need password.\"");
