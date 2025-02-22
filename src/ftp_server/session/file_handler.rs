@@ -1,3 +1,4 @@
+use crate::ftp_server::drive_error::DriveError;
 use log::{debug, warn};
 use once_cell::sync::Lazy;
 use std::error::Error;
@@ -12,48 +13,41 @@ static ROOT_PATH: Lazy<&'static Path> = Lazy::new(|| {
     let path = Path::new(r"C:\Users\nadav\Documents\Rust\LevisDrive\DriveRoot");
     fs::create_dir_all(path).expect("Failed to create root directory");
     path
-});
+}); // TODO fix this
 
 pub struct FilesHandler;
 
+// TODO change to async
 impl FilesHandler {
     // Create a file (or open it if it exists)
-    pub fn create_file(file_path: &str) -> Result<File, Box<dyn Error>> {
+    pub fn create_file(file_path: &str) -> Result<File, DriveError> {
         let file = File::create(ROOT_PATH.join(file_path))?;
         Ok(file)
     }
 
     // Open an existing file for reading
-    pub fn open_file_for_reading(file_path: &str) -> Result<BufReader<File>, Box<dyn Error>> {
+    pub fn open_file_for_reading(file_path: &str) -> Result<BufReader<File>, DriveError> {
         let file = File::open(ROOT_PATH.join(file_path))?;
         Ok(BufReader::new(file))
     }
 
     // Write data to a file
-    pub fn write_to_file(file_path: &str, data: &[u8]) -> Result<(), Box<dyn Error>> {
+    pub fn write_to_file(file_path: &str, data: &[u8]) -> Result<(), DriveError> {
         let mut file = File::create(ROOT_PATH.join(file_path))?;
         file.write_all(data)?;
         Ok(())
     }
 
     // Append data to a file
-    pub fn append_to_file(file_path: &str, data: &[u8]) -> Result<(), Box<dyn Error>> {
+    pub fn append_to_file(file_path: &str, data: &[u8]) -> Result<(), DriveError> {
         let file = OpenOptions::new().append(true).open(file_path)?;
         let mut writer = BufWriter::new(file);
         writer.write_all(data)?;
         Ok(())
     }
 
-    // Read a file
-    pub fn read_file(file_path: &str) -> Result<String, Box<dyn Error>> {
-        let mut reader = FilesHandler::open_file_for_reading(file_path)?;
-        let mut content = String::new();
-        reader.read_to_string(&mut content)?;
-        Ok(content)
-    }
-
     // List all files in a directory
-    pub fn list_files_in_directory(directory_path: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    pub fn list_files_in_directory(directory_path: &str) -> Result<Vec<String>, DriveError> {
         let paths = read_dir(directory_path)?;
         let mut file_list = Vec::new();
 
@@ -86,7 +80,7 @@ impl FilesHandler {
         perms
     }
 
-    pub fn list_dir(directory: &str) -> Result<String, Box<dyn Error>> {
+    pub fn list_dir(directory: &str) -> Result<String, DriveError> {
         let directory_path = ROOT_PATH.join(directory);
         debug!(
             "Listing the directory: {}",
@@ -98,7 +92,6 @@ impl FilesHandler {
         let mut response = String::new();
         let now = Utc::now();
         let formatted_date = now.format("%b %e %H:%M").to_string();
-        response.push_str("150 Opening data connection for directory list.\n");
         response.push_str(&format!(
             "drwxr-xr-x   1 admin admin        0 {} .\r\n",
             formatted_date
@@ -135,14 +128,12 @@ impl FilesHandler {
                 Err(e) => warn!("Failed to read entry: {}", e),
             }
         }
-        response.push_str("226 Transfer complete.\r\n");
 
         Ok(response)
     }
 
     pub fn make_directory(directory: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        fs::create_dir_all(ROOT_PATH.join(directory))?; // Creates nested directories if they don't exist
-
+        fs::create_dir_all(ROOT_PATH.join(directory))?;
         Ok(())
     }
 }
