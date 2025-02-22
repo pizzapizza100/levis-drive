@@ -19,15 +19,15 @@ impl FtpRequest {
 
 impl fmt::Display for FtpRequest {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.parameters.len() > 0 {
+        if !self.parameters.is_empty() {
             write!(
                 f,
-                "FtpRequest: command: \"{}\", parameters: [{}]",
+                "Command: \"{}\", parameters: [{}]",
                 self.command,
                 self.parameters.join(", ")
             )
         } else {
-            write!(f, "FtpRequest: command: \"{}\".", self.command)
+            write!(f, "Command: \"{}\"", self.command)
         }
     }
 }

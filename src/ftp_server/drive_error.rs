@@ -20,8 +20,8 @@ pub enum DriveError {
     #[error("Protocol violation error: {0}")]
     ProtocolViolation(&'static str),
 
-    #[error("Invalid IP format error: {0}")]
-    InvalidIpFormat(String),
+    #[error("File system error: {0}")]
+    FileSystem(String),
 
     #[error("General error: {0}")]
     Custom(String),
