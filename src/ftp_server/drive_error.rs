@@ -11,6 +11,9 @@ pub enum DriveError {
     #[error("Parse error: {0}")]
     Parse(#[from] std::num::ParseIntError),
 
+    #[error("Network error: {0}")]
+    Network(String),
+
     #[error("Reqwest error: {0}")]
     Reqwest(#[from] reqwest::Error),
 

@@ -5,10 +5,11 @@ use log::{debug, error, info};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::io::{ErrorKind, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::BufReader;
+
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
@@ -26,6 +27,7 @@ pub struct Session {
     command_channel_read: Option<OwnedReadHalf>,
     data_channel: Arc<Mutex<Option<TcpStream>>>,
     cwd: PathBuf,
+    selected_file: Option<PathBuf>,
 }
 
 impl Session {
@@ -42,6 +44,7 @@ impl Session {
             command_channel_read: Some(read_half),
             data_channel: Arc::new(Mutex::new(None)),
             cwd: FilesHandler::get_root_dir().to_path_buf(),
+            selected_file: None,
         })
     }
 
@@ -52,6 +55,7 @@ impl Session {
             peer_ip: self.peer_ip.clone(),
             peer_port: self.peer_port,
             cwd: self.cwd.clone(),
+            selected_file: self.selected_file.clone(),
 
             command_channel_write: Arc::clone(&self.command_channel_write),
             command_channel_read: None,
@@ -60,7 +64,7 @@ impl Session {
         })
     }
 
-    async fn send(&self, data: &[u8]) -> Result<(), DriveError> {
+    pub async fn send(&self, data: &[u8]) -> Result<(), DriveError> {
         let mut command_channel_write_locked = self.command_channel_write.lock().await;
 
         command_channel_write_locked.write_all(data).await?;
@@ -93,7 +97,7 @@ impl Session {
         Ok(())
     }
 
-    pub async fn handle_unknwon(&mut self) -> Result<(), DriveError> {
+    pub async fn handle_unknown(&mut self) -> Result<(), DriveError> {
         self.send(b"500 Unknown command.\r\n").await?;
         Ok(())
     }
@@ -211,11 +215,11 @@ impl Session {
     }
 
     pub async fn handle_stor(&self, request: &FtpRequest) -> Result<(), DriveError> {
-        let file_name = request
-            .parameters
-            .first()
-            .map(String::as_str)
-            .ok_or(DriveError::MissingParameter("missing file name parameter."))?;
+        if request.parameters.is_empty() {
+            return Err(DriveError::MissingParameter("missing file name parameter."));
+        }
+
+        let file_name = request.parameters.join(" ");
 
         let mut data_channel_locked = self.data_channel.lock().await;
 
@@ -225,7 +229,7 @@ impl Session {
                 "Requesting data request without a data channel.",
             ))?;
 
-        let mut file = FilesHandler::create_file(file_name)?; // TODO change to open for write
+        let mut file = FilesHandler::create_file(file_name.as_str())?; // TODO change to open for write
         let mut buffer = vec![0; 1024 * 8];
 
         info!("Starting to upload: {}", file_name);
@@ -305,6 +309,8 @@ impl Session {
 
         info!("Done sending {}'s data.", file_path);
 
+        data_stream.shutdown().await?;
+
         self.send(b"226 - Closing data connection; file transfer successful.\r\n")
             .await?;
         Ok(())
@@ -365,7 +371,14 @@ impl Session {
 
             match TcpListener::bind(("0.0.0.0", data_port)).await {
                 Ok(listener) => break listener,
-                Err(e) if e.kind() == ErrorKind::AddrInUse => continue,
+                Err(e) if e.kind() == ErrorKind::AddrInUse => {
+                    debug!(
+                        "Fail to bind port {data_port} due to the address is in use... retrying..."
+                    )
+                }
+                Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                    debug!("Fail to bind port {data_port} due to ... retrying...")
+                }
                 Err(e) => return Err(e.into()),
             };
         };
@@ -408,6 +421,47 @@ impl Session {
         Ok(())
     }
 
+    pub async fn handle_rnfr(&mut self, request: &FtpRequest) -> Result<(), DriveError> {
+        // Expected format: " MKD <directory name>"
+
+        let file_path = PathBuf::from(request.parameters.join(" "));
+
+        if let Err(e) = FilesHandler::check_exists(&file_path) {
+            self.send(b"d550 File not found data.\r\n").await?;
+            return Err(e);
+        }
+
+        self.selected_file = Some(PathBuf::from(file_path));
+
+        self.send(b"350 File exists, ready for destination name.\r\n")
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn handle_rnto(&mut self, request: &FtpRequest) -> Result<(), DriveError> {
+        // Expected format: " MKD <directory name>"
+
+        let new_file_path = PathBuf::from(request.parameters.join(" "));
+
+        let old_file = self
+            .selected_file
+            .take()
+            .ok_or(DriveError::ProtocolViolation(
+                "Can't provide a path to a new file without specifying which file to operate on.",
+            ))?;
+
+        if let Err(e) = FilesHandler::rename(&old_file, &new_file_path) {
+            self.send(b"d550 File not found data.\r\n").await?;
+            return Err(e);
+        }
+
+        self.send(b"350 File exists, ready for destination name.\r\n")
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn handle_mkd(&mut self, request: &FtpRequest) -> Result<(), DriveError> {
         // Expected format: " MKD <directory name>"
 
@@ -433,16 +487,24 @@ impl Session {
                 )))
             }
         };
+        let relative_path_display = relative_path.display().to_string();
+        let relative_path_string = if relative_path_display.is_empty() {
+            "\\".to_string()
+        } else {
+            relative_path_display
+        };
 
-        let mut pwd = format!(
-            "257 \"{}\" is the current directory.",
+        let response = format!(
+            "257 \"{}\" is the current directory.\r\n",
             relative_path.display()
         );
 
-        debug!("{}'s Current working directory: {}", self.peer_ip, pwd);
+        debug!(
+            "{}'s Current working directory: {}",
+            self.peer_ip, relative_path_string
+        );
 
-        pwd.push_str("\r\n");
-        self.send(pwd.as_bytes()).await?;
+        self.send(response.as_bytes()).await?;
 
         Ok(())
     }

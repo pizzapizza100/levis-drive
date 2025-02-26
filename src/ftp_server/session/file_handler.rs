@@ -1,10 +1,10 @@
 use crate::ftp_server::drive_error::DriveError;
 use log::{debug, warn};
 use once_cell::sync::Lazy;
-use std::fs;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
+use std::{fs, path::PathBuf};
 
 use chrono::{DateTime, Utc};
 
@@ -28,6 +28,16 @@ impl FilesHandler {
     pub fn open_file_for_reading(file_path: &str) -> Result<BufReader<File>, DriveError> {
         let file = File::open(ROOT_PATH.join(file_path))?;
         Ok(BufReader::new(file))
+    }
+
+    pub fn check_exists(file_path: &PathBuf) -> Result<bool, DriveError> {
+        // TODO
+        Ok(true)
+    }
+
+    pub fn rename(old_file: &PathBuf, new_file_path: &PathBuf) -> Result<(), DriveError> {
+        // TODO
+        Ok(())
     }
 
     fn get_unix_permissions(metadata: &fs::Metadata) -> String {

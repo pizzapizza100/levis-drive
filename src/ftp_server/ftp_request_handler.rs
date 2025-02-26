@@ -51,7 +51,10 @@ async fn handle_client(stream: TcpStream) {
         let request: FtpRequest = match get_new_request(&mut peer_session).await {
             Ok(s) => s,
             Err(e) => {
-                warn!("Failed to receive string: {}, Exiting...", e);
+                warn!(
+                    "{}:{} failed to receive string: {}, Exiting...",
+                    peer_session.peer_ip, peer_session.peer_port, e
+                );
                 return;
             }
         };
@@ -64,7 +67,13 @@ async fn handle_client(stream: TcpStream) {
         // Handle the request while holding the lock
         match handle_request(&mut peer_session, request).await {
             Err(DriveError::Disconnect()) => return,
-            Err(e) => warn!("{}", e),
+            Err(e) => {
+                warn!("{}", e);
+
+                if let Err(send_result) = peer_session.send(e.to_string().as_bytes()).await {
+                    warn!("{}", send_result);
+                };
+            }
             _ => {}
         }
     }
@@ -119,14 +128,11 @@ async fn handle_request(peer_session: &mut Session, request: FtpRequest) -> Resu
             Err(DriveError::Disconnect())
         }
         _ => {
-            debug!("{} has requested unknown command.", peer_session.peer_ip);
-            peer_session.handle_unknwon().await
+            warn!("{} has requested unknown command.", peer_session.peer_ip);
+            peer_session.handle_unknown().await
         }
     };
 
-    if result.is_ok() {
-        debug!("Handled successfully");
-    }
     result
 }
 
@@ -142,11 +148,18 @@ async fn get_new_request(peer_session: &mut Session) -> Result<FtpRequest, Drive
 }
 
 async fn keep_posted_ip_valid() {
+    let mut failed_request_count = 0;
+
     loop {
+        if failed_request_count == 3 {
+            panic!("No internet!");
+        }
+
         let router_public_ip = match posted_ip::get_router_public_ip().await {
             Ok(data) => data,
             Err(e) => {
                 warn!("Failed to get router's ip: {:?}", e);
+                failed_request_count += 1;
                 continue;
             }
         };
@@ -155,12 +168,13 @@ async fn keep_posted_ip_valid() {
             Ok(data) => data,
             Err(e) => {
                 warn!("Failed to get posted ip: {:?}", e);
+                failed_request_count += 1;
                 continue;
             }
         };
 
         if posted_ip != router_public_ip {
-            debug!(
+            info!(
                 "Changing posted IP from: \"{}\", To \"{}\"",
                 posted_ip, router_public_ip
             );
@@ -171,6 +185,8 @@ async fn keep_posted_ip_valid() {
                     warn!("Failed to update posted ip: {:?}", e);
                 }
             }
+        } else {
+            debug!("No need to update IP.");
         }
 
         sleep(Duration::from_secs(CHECK_POSTED_IP_INTERVAL)).await;
