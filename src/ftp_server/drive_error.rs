@@ -26,6 +26,9 @@ pub enum DriveError {
     #[error("File system error: {0}")]
     FileSystem(String),
 
+    #[error("StripPrefix error: {0}")]
+    StripPrefix(#[from] std::path::StripPrefixError),
+
     #[error("General error: {0}")]
     Custom(String),
 }

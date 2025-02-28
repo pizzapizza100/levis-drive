@@ -4,13 +4,13 @@ use crate::ftp_server::posted_ip::get_router_public_ip;
 use log::{debug, error, info};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use std::io::{ErrorKind, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::BufReader;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
@@ -43,7 +43,7 @@ impl Session {
             command_channel_write: Arc::new(Mutex::new(write_half)),
             command_channel_read: Some(read_half),
             data_channel: Arc::new(Mutex::new(None)),
-            cwd: FilesHandler::get_root_dir().to_path_buf(),
+            cwd: PathBuf::from("\\"),
             selected_file: None,
         })
     }
@@ -196,7 +196,7 @@ impl Session {
     pub async fn handle_syst(&mut self) -> Result<(), DriveError> {
         // Expected format: "SYST"
 
-        self.send(b"215 215 Windows_NT.\r\n").await?;
+        self.send(b"215 Windows_NT.\r\n").await?;
         Ok(())
     }
 
@@ -229,7 +229,7 @@ impl Session {
                 "Requesting data request without a data channel.",
             ))?;
 
-        let mut file = FilesHandler::create_file(file_name.as_str())?; // TODO change to open for write
+        let mut file = FilesHandler::create_file(&file_name).await?; // TODO change to open for write
         let mut buffer = vec![0; 1024 * 8];
 
         info!("Starting to upload: {}", file_name);
@@ -258,7 +258,7 @@ impl Session {
                 break;
             }
 
-            file.write_all(&buffer[..bytes_read])?;
+            file.write_all(&buffer[..bytes_read]).await?;
         }
 
         data_stream.shutdown().await?;
@@ -291,7 +291,8 @@ impl Session {
                 "Requesting data request without a data channel.",
             ))?;
 
-        let mut reader = FilesHandler::open_file_for_reading(file_path.as_str())?;
+        let mut reader: BufReader<fs::File> =
+            FilesHandler::open_file_for_reading(&file_path).await?;
 
         let mut buffer = vec![0; 1024 * 8];
 
@@ -300,7 +301,7 @@ impl Session {
         self.send(b"150 - File status okay; about to open data connection.\r\n")
             .await?;
 
-        while let Ok(bytes_read) = reader.read(&mut buffer) {
+        while let Ok(bytes_read) = reader.read(&mut buffer).await {
             if bytes_read == 0 {
                 break;
             }
@@ -309,6 +310,7 @@ impl Session {
 
         info!("Done sending {}'s data.", file_path);
 
+        reader.shutdown().await?;
         data_stream.shutdown().await?;
 
         self.send(b"226 - Closing data connection; file transfer successful.\r\n")
@@ -334,7 +336,7 @@ impl Session {
                 "Requesting data request without a data channel.",
             ))?;
 
-        let response = FilesHandler::list_dir(directory_path)?;
+        let response = FilesHandler::list_dir(&directory_path).await?;
 
         debug!("Sending Opening data connection message...");
         self.send(b"150 Opening data connection for directory list.\r\n")
@@ -422,16 +424,16 @@ impl Session {
     }
 
     pub async fn handle_rnfr(&mut self, request: &FtpRequest) -> Result<(), DriveError> {
-        // Expected format: " MKD <directory name>"
+        // Expected format: "RNFR <file name>"
 
         let file_path = PathBuf::from(request.parameters.join(" "));
 
-        if let Err(e) = FilesHandler::check_exists(&file_path) {
+        if let Err(e) = FilesHandler::check_exists(&file_path).await {
             self.send(b"d550 File not found data.\r\n").await?;
             return Err(e);
         }
 
-        self.selected_file = Some(PathBuf::from(file_path));
+        self.selected_file = Some(file_path);
 
         self.send(b"350 File exists, ready for destination name.\r\n")
             .await?;
@@ -440,7 +442,7 @@ impl Session {
     }
 
     pub async fn handle_rnto(&mut self, request: &FtpRequest) -> Result<(), DriveError> {
-        // Expected format: " MKD <directory name>"
+        // Expected format: "RNTO <file name>"
 
         let new_file_path = PathBuf::from(request.parameters.join(" "));
 
@@ -451,7 +453,7 @@ impl Session {
                 "Can't provide a path to a new file without specifying which file to operate on.",
             ))?;
 
-        if let Err(e) = FilesHandler::rename(&old_file, &new_file_path) {
+        if let Err(e) = FilesHandler::rename(&old_file, &new_file_path).await {
             self.send(b"d550 File not found data.\r\n").await?;
             return Err(e);
         }
@@ -467,10 +469,13 @@ impl Session {
 
         let directory_path = request.parameters.join(" ");
 
-        match FilesHandler::make_directory(directory_path.as_str()) {
-            Ok(_) => self.send(b"257 \"{directory_name}\" created.\r\n").await?,
-            Err(_) => self.send(b"550 Failed to create directory.\r\n").await?,
+        if let Err(e) = FilesHandler::make_directory(&directory_path).await {
+            self.send(b"550 Failed to create directory.\r\n").await?;
+            return Err(e);
         }
+
+        self.send(format!(r#"257 "{}" created.\r\n"#, directory_path).as_bytes())
+            .await?;
 
         Ok(())
     }
@@ -478,30 +483,21 @@ impl Session {
     pub async fn handle_pwd(&self) -> Result<(), DriveError> {
         // Expected format: "PWD"
 
-        let relative_path = match self.cwd.strip_prefix(FilesHandler::get_root_dir()) {
-            Ok(relative_path) => relative_path,
-            Err(_) => {
-                return Err(DriveError::FileSystem(format!(
-                    "Failed strip root from cwd: {}",
-                    self.cwd.display()
-                )))
-            }
-        };
-        let relative_path_display = relative_path.display().to_string();
-        let relative_path_string = if relative_path_display.is_empty() {
-            "\\".to_string()
-        } else {
-            relative_path_display
+        debug!("cwd: {}", self.cwd.display());
+        let relative_path_display = self.cwd.display().to_string();
+        let relative_path_display = match relative_path_display.as_str() {
+            "" => "\\",
+            data => data,
         };
 
         let response = format!(
             "257 \"{}\" is the current directory.\r\n",
-            relative_path.display()
+            relative_path_display
         );
 
         debug!(
             "{}'s Current working directory: {}",
-            self.peer_ip, relative_path_string
+            self.peer_ip, relative_path_display
         );
 
         self.send(response.as_bytes()).await?;
@@ -511,30 +507,22 @@ impl Session {
 
     pub async fn handle_cwd(&mut self, request: &FtpRequest) -> Result<(), DriveError> {
         let requested_path = match request.parameters.as_slice() {
-            [] => FilesHandler::get_root_dir().to_path_buf(),
-            [s] if s == "\\" => FilesHandler::get_root_dir().to_path_buf(),
-            [single] => FilesHandler::get_root_dir().join(single),
-            _ => FilesHandler::get_root_dir().join(request.parameters.join(" ")),
+            [single] => single.to_owned(),
+            _ => request.parameters.join(" "),
         };
 
-        debug!("Requested directory: {}", requested_path.display());
+        debug!("Requested directory: {}", requested_path);
 
-        if !requested_path.exists() {
-            self.send(
-                format!(
-                    "550 {}: No such file or directory.\r\n",
-                    requested_path.to_string_lossy()
-                )
-                .as_bytes(),
-            )
-            .await?;
+        if !FilesHandler::check_exists(&requested_path).await? {
+            self.send(format!("550 {}: No such file or directory.\r\n", requested_path).as_bytes())
+                .await?;
             return Err(DriveError::FileSystem(format!(
                 "No such file or directory: {}",
-                requested_path.to_string_lossy()
+                requested_path
             )));
         }
 
-        self.cwd = requested_path;
+        self.cwd = PathBuf::from(requested_path);
 
         debug!(
             "Changing {}'s Current Working Directory to: {}",

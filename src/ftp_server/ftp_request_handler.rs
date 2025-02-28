@@ -1,6 +1,8 @@
 use crate::ftp_server::drive_error::DriveError;
 use crate::ftp_server::posted_ip;
+use crate::ftp_server::session::file_handler::FilesHandler;
 use crate::ftp_server::session::ftp_request::FtpRequest;
+
 use crate::ftp_server::session::session::Session;
 use log::{debug, info, warn};
 use tokio::net::TcpListener;
@@ -11,6 +13,10 @@ const CHECK_POSTED_IP_INTERVAL: u64 = 60 * 5;
 
 pub async fn serve() {
     tokio::spawn(keep_posted_ip_valid());
+
+    if let Err(e) = FilesHandler::init_root_path().await {
+        panic!("{e}");
+    }
 
     let listener = TcpListener::bind("0.0.0.0:2121")
         .await
@@ -118,6 +124,8 @@ async fn handle_request(peer_session: &mut Session, request: FtpRequest) -> Resu
         "FEAT" => peer_session.handle_feat().await,
         "OPTS" => peer_session.handle_opts().await,
         "SYST" => peer_session.handle_syst().await,
+        "RNFR" => peer_session.handle_rnfr(&request).await,
+        "RNTO" => peer_session.handle_rnto(&request).await,
         "MKD" => peer_session.handle_mkd(&request).await,
         "PWD" => peer_session.handle_pwd().await,
         "CWD" => peer_session.handle_cwd(&request).await,
