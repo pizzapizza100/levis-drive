@@ -2,10 +2,13 @@ use crate::ftp_server::drive_error::DriveError;
 use crate::ftp_server::posted_ip::get_router_public_ip;
 
 use log::{debug, error, info};
+use once_cell::sync::Lazy;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::io::ErrorKind;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::BufReader;
@@ -18,11 +21,15 @@ use tokio::sync::Mutex;
 use super::file_handler::FilesHandler;
 use super::ftp_request::FtpRequest;
 
+static LOCAL_IP_AND_SUBNET_MASK: Lazy<(Ipv4Addr, Ipv4Addr)> =
+    Lazy::new(|| get_local_ip_and_subnet().unwrap());
+
 pub struct Session {
     pub is_authenticated: bool,
     pub username: Option<String>,
     pub peer_ip: String,
     pub peer_port: u16,
+    pub is_lan_connection: bool,
     command_channel_write: Arc<Mutex<OwnedWriteHalf>>,
     command_channel_read: Option<OwnedReadHalf>,
     data_channel: Arc<Mutex<Option<TcpStream>>>,
@@ -34,8 +41,19 @@ impl Session {
     pub async fn new(stream: TcpStream) -> Result<Self, DriveError> {
         let peer_addr = stream.peer_addr()?;
         let (read_half, write_half) = stream.into_split();
+        let (local_ip, local_subnet_mask) = *LOCAL_IP_AND_SUBNET_MASK;
+
+        let peer_ipv4 = match peer_addr.ip() {
+            IpAddr::V4(ip) => ip,
+            IpAddr::V6(_) => {
+                return Err(DriveError::Network(
+                    "Expected an IPv4 address, but got IPv6!".to_string(),
+                ))
+            }
+        };
 
         Ok(Session {
+            is_lan_connection: is_local_ip(peer_ipv4, local_ip, local_subnet_mask),
             is_authenticated: false,
             username: None,
             peer_ip: peer_addr.ip().to_string(),
@@ -43,13 +61,14 @@ impl Session {
             command_channel_write: Arc::new(Mutex::new(write_half)),
             command_channel_read: Some(read_half),
             data_channel: Arc::new(Mutex::new(None)),
-            cwd: PathBuf::from("\\"),
+            cwd: PathBuf::new(),
             selected_file: None,
         })
     }
 
     pub fn clone_session(&self) -> Arc<Session> {
         Arc::new(Session {
+            is_lan_connection: self.is_lan_connection,
             is_authenticated: self.is_authenticated,
             username: self.username.clone(),
             peer_ip: self.peer_ip.clone(),
@@ -178,12 +197,18 @@ impl Session {
     pub async fn handle_feat(&mut self) -> Result<(), DriveError> {
         // Expected format: "FEAT"
 
-        self.send(b"211-Extensions supported:\r\n").await?;
-        self.send(b" UTF8\r\n").await?;
-        self.send(b" PASV\r\n").await?;
-        self.send(b"211 End\r\n").await?;
+        let mut response = String::new();
+
+        response.push_str("211-Extensions supported:\r\n");
+
+        response.push_str("UTF8\r\n");
+        response.push_str("PASV\r\n");
+        response.push_str("PASV\r\n");
+
+        response.push_str("211 End\r\n");
+
+        self.send(response.as_bytes()).await?;
         Ok(())
-        // TODO fix
     }
 
     pub async fn handle_opts(&mut self) -> Result<(), DriveError> {
@@ -201,11 +226,11 @@ impl Session {
     }
 
     pub async fn handle_dele(&self, request: &FtpRequest) -> Result<(), DriveError> {
-        let file_name = request
-            .parameters
-            .first()
-            .map(String::as_str)
-            .ok_or(DriveError::MissingParameter("missing file name parameter."))?;
+        if request.parameters.is_empty() {
+            return Err(DriveError::MissingParameter("missing file name parameter."));
+        }
+
+        let file_name = request.parameters.join(" ");
 
         fs::remove_file(FilesHandler::get_root_dir().join(file_name)).await?;
 
@@ -213,6 +238,29 @@ impl Session {
 
         Ok(())
     }
+
+    pub async fn handle_rmd(&mut self, request: &FtpRequest) -> Result<(), DriveError> {
+        // Expected format: " RMD <directory name>"
+        
+        if request.parameters.is_empty() {
+            return Err(DriveError::MissingParameter("missing file name parameter."));
+        }
+
+        let directory_path = request.parameters.join(" ");
+    
+        debug!("Removing directory: {}", directory_path);
+    
+        if let Err(e) = FilesHandler::remove_directory(&directory_path).await {
+            self.send(b"550 Failed to remove directory.\r\n").await?;
+            return Err(e);
+        }
+    
+        self.send(format!("250 \"{}\" removed.\r\n", directory_path).as_bytes())
+            .await?;
+    
+        Ok(())
+    }
+    
 
     pub async fn handle_stor(&self, request: &FtpRequest) -> Result<(), DriveError> {
         if request.parameters.is_empty() {
@@ -454,12 +502,11 @@ impl Session {
             ))?;
 
         if let Err(e) = FilesHandler::rename(&old_file, &new_file_path).await {
-            self.send(b"d550 File not found data.\r\n").await?;
+            self.send(b"550 File not found data.\r\n").await?;
             return Err(e);
         }
 
-        self.send(b"350 File exists, ready for destination name.\r\n")
-            .await?;
+        self.send(b"250 File successfully renamed.\r\n").await?;
 
         Ok(())
     }
@@ -469,12 +516,14 @@ impl Session {
 
         let directory_path = request.parameters.join(" ");
 
+        debug!("Creating directory: {}", directory_path);
+
         if let Err(e) = FilesHandler::make_directory(&directory_path).await {
             self.send(b"550 Failed to create directory.\r\n").await?;
             return Err(e);
         }
 
-        self.send(format!(r#"257 "{}" created.\r\n"#, directory_path).as_bytes())
+        self.send(format!("257 \"{}\" created.\r\n", directory_path).as_bytes())
             .await?;
 
         Ok(())
@@ -484,16 +533,13 @@ impl Session {
         // Expected format: "PWD"
 
         debug!("cwd: {}", self.cwd.display());
-        let relative_path_display = self.cwd.display().to_string();
-        let relative_path_display = match relative_path_display.as_str() {
+        let relative_path = self.cwd.display().to_string();
+        let relative_path_display = match relative_path.as_str() {
             "" => "\\",
             data => data,
         };
 
-        let response = format!(
-            "257 \"{}\" is the current directory.\r\n",
-            relative_path_display
-        );
+        let response = format!("257 \"{}\" is the current directory.\r\n", relative_path);
 
         debug!(
             "{}'s Current working directory: {}",
@@ -510,8 +556,6 @@ impl Session {
             [single] => single.to_owned(),
             _ => request.parameters.join(" "),
         };
-
-        debug!("Requested directory: {}", requested_path);
 
         if !FilesHandler::check_exists(&requested_path).await? {
             self.send(format!("550 {}: No such file or directory.\r\n", requested_path).as_bytes())
@@ -542,4 +586,65 @@ impl Session {
         self.send(b"221 Goodbye").await?;
         Ok(())
     }
+}
+
+fn get_local_ip_and_subnet() -> Result<(Ipv4Addr, Ipv4Addr), DriveError> {
+    let output = Command::new("ipconfig")
+        .output()
+        .expect("Failed to execute command");
+
+    let output_str = String::from_utf8_lossy(&output.stdout);
+
+    let mut local_ip = None;
+    let mut local_subnet_mask = None;
+
+    for line in output_str.lines() {
+        if line.contains("IPv4") {
+            let parts: Vec<&str> = line.split(':').collect();
+            let ip = parts[1].trim().to_string();
+            let ip_parts: Vec<&str> = ip.split('.').collect();
+
+            if ip_parts.len() == 4 {
+                local_ip = Some(Ipv4Addr::new(
+                    ip_parts[0].parse()?,
+                    ip_parts[1].parse()?,
+                    ip_parts[2].parse()?,
+                    ip_parts[3].parse()?,
+                ));
+            }
+        }
+        if line.contains("Subnet Mask") {
+            let parts: Vec<&str> = line.split(':').collect();
+            let subnet_mask_string = parts[1].trim().to_string();
+            let subnet_mask_parts: Vec<&str> = subnet_mask_string.split('.').collect();
+
+            if subnet_mask_parts.len() == 4 {
+                local_subnet_mask = Some(Ipv4Addr::new(
+                    subnet_mask_parts[0].parse()?,
+                    subnet_mask_parts[1].parse()?,
+                    subnet_mask_parts[2].parse()?,
+                    subnet_mask_parts[3].parse()?,
+                ));
+            }
+        }
+    }
+    if local_ip.is_none() || local_subnet_mask.is_none() {
+        return Err(DriveError::Network(
+            "Could not retrieve local IP and subnet.".to_string(),
+        ));
+    }
+
+    Ok((local_ip.unwrap(), local_subnet_mask.unwrap()))
+}
+
+fn is_local_ip(ip: Ipv4Addr, local_ip: Ipv4Addr, subnet_mask: Ipv4Addr) -> bool {
+    let ip_octets = ip.octets();
+    let local_octets = local_ip.octets();
+    let mask_octets = subnet_mask.octets();
+
+    ip_octets
+        .iter()
+        .zip(local_octets.iter())
+        .zip(mask_octets.iter())
+        .all(|((ip, local), mask)| (ip & mask) == (local & mask))
 }

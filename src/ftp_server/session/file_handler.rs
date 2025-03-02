@@ -19,7 +19,7 @@ impl FilesHandler {
     /// Initializes the global root directory asynchronously.
     /// This must be called once (e.g. at application startup) before any file operations.
     pub async fn init_root_path() -> DriveResult<()> {
-        let root = PathBuf::from(r"C:\Users\nadav\Documents\Rust\LevisDrive\DriveRoot");
+        let root = PathBuf::from(r"D:\LevisDriveRoot");
         fs::create_dir_all(&root).await?;
         // If already set, return an error; otherwise, set the root path.
         ROOT_PATH
@@ -111,7 +111,6 @@ impl FilesHandler {
 
         while let Some(entry) = read_dir.next_entry().await? {
             let full_path = entry.path();
-            debug!("full_path: {}", full_path.display());
             let path = full_path.strip_prefix(root)?;
 
             let metadata = entry.metadata().await?;
@@ -137,8 +136,6 @@ impl FilesHandler {
             ));
         }
 
-        debug!("{response}");
-
         Ok(response)
     }
 
@@ -147,6 +144,14 @@ impl FilesHandler {
         let root = ROOT_PATH.get().expect("Root path not initialized");
         let dir_path = root.join(directory);
         fs::create_dir_all(dir_path).await?;
+        Ok(())
+    }
+
+    /// Removes a directory and its contents asynchronously.
+    pub async fn remove_directory(directory: &impl AsRef<Path>) -> DriveResult<()> {
+        let root = ROOT_PATH.get().expect("Root path not initialized");
+        let dir_path = root.join(directory);
+        fs::remove_dir_all(dir_path).await?;
         Ok(())
     }
 

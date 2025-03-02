@@ -1,10 +1,12 @@
+use std::process::exit;
+
 use crate::ftp_server::drive_error::DriveError;
 use crate::ftp_server::posted_ip;
 use crate::ftp_server::session::file_handler::FilesHandler;
 use crate::ftp_server::session::ftp_request::FtpRequest;
 
 use crate::ftp_server::session::session::Session;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
@@ -14,8 +16,9 @@ const CHECK_POSTED_IP_INTERVAL: u64 = 60 * 5;
 pub async fn serve() {
     tokio::spawn(keep_posted_ip_valid());
 
-    if let Err(e) = FilesHandler::init_root_path().await {
-        panic!("{e}");
+    if FilesHandler::init_root_path().await.is_err() {
+        error!("Failed to init the root folder!");
+        exit(0);
     }
 
     let listener = TcpListener::bind("0.0.0.0:2121")
@@ -43,10 +46,17 @@ async fn handle_client(stream: TcpStream) {
         }
     };
 
-    info!(
-        "{}:{} has connected, sending welcome message...",
-        peer_session.peer_ip, peer_session.peer_port
-    );
+    if peer_session.is_lan_connection {
+        info!(
+            "{}:{} has connected locally, sending welcome message...",
+            peer_session.peer_ip, peer_session.peer_port
+        );
+    } else {
+        info!(
+            "{}:{} has connected, sending welcome message...",
+            peer_session.peer_ip, peer_session.peer_port
+        );
+    }
 
     if let Err(e) = peer_session.handle_welcome().await {
         warn!("Failed to create new session: {}", e);
@@ -58,9 +68,10 @@ async fn handle_client(stream: TcpStream) {
             Ok(s) => s,
             Err(e) => {
                 warn!(
-                    "{}:{} failed to receive string: {}, Exiting...",
+                    "{}:{} failed to receive string: {}, Disconnecting...",
                     peer_session.peer_ip, peer_session.peer_port, e
                 );
+
                 return;
             }
         };
@@ -127,6 +138,7 @@ async fn handle_request(peer_session: &mut Session, request: FtpRequest) -> Resu
         "RNFR" => peer_session.handle_rnfr(&request).await,
         "RNTO" => peer_session.handle_rnto(&request).await,
         "MKD" => peer_session.handle_mkd(&request).await,
+        "RMD" => peer_session.handle_rmd(&request).await,
         "PWD" => peer_session.handle_pwd().await,
         "CWD" => peer_session.handle_cwd(&request).await,
         "DELE" => peer_session.handle_dele(&request).await,
