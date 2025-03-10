@@ -11,10 +11,11 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::io::BufReader;
+use tokio::io::{BufReader, ReadHalf, WriteHalf};
+use tokio_rustls::server::TlsStream;
+use tokio_rustls::TlsAcceptor;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
@@ -24,23 +25,28 @@ use super::ftp_request::FtpRequest;
 static LOCAL_IP_AND_SUBNET_MASK: Lazy<(Ipv4Addr, Ipv4Addr)> =
     Lazy::new(|| get_local_ip_and_subnet().unwrap());
 
+pub type SecureStream = TlsStream<TcpStream>;
+
 pub struct Session {
     pub is_authenticated: bool,
+    pub is_secure: bool,
     pub username: Option<String>,
     pub peer_ip: String,
     pub peer_port: u16,
     pub is_lan_connection: bool,
-    command_channel_write: Arc<Mutex<OwnedWriteHalf>>,
-    command_channel_read: Option<OwnedReadHalf>,
-    data_channel: Arc<Mutex<Option<TcpStream>>>,
+    command_channel_write: Arc<Mutex<WriteHalf<SecureStream>>>,
+    command_channel_read: Option<ReadHalf<SecureStream>>,
+    data_channel: Arc<Mutex<Option<SecureStream>>>,
     cwd: PathBuf,
     selected_file: Option<PathBuf>,
+    acceptor: Arc<TlsAcceptor>,
 }
 
 impl Session {
-    pub async fn new(stream: TcpStream) -> Result<Self, DriveError> {
-        let peer_addr = stream.peer_addr()?;
-        let (read_half, write_half) = stream.into_split();
+    pub async fn new(acceptor: Arc<TlsAcceptor>, stream: SecureStream) -> Result<Self, DriveError> {
+        let tcp_stream = stream.get_ref().0;
+        let peer_addr = tcp_stream.peer_addr()?;
+        let (read_half, write_half) = tokio::io::split(stream);
         let (local_ip, local_subnet_mask) = *LOCAL_IP_AND_SUBNET_MASK;
 
         let peer_ipv4 = match peer_addr.ip() {
@@ -54,6 +60,7 @@ impl Session {
 
         Ok(Session {
             is_lan_connection: is_local_ip(peer_ipv4, local_ip, local_subnet_mask),
+            is_secure: false,
             is_authenticated: false,
             username: None,
             peer_ip: peer_addr.ip().to_string(),
@@ -63,12 +70,14 @@ impl Session {
             data_channel: Arc::new(Mutex::new(None)),
             cwd: PathBuf::new(),
             selected_file: None,
+            acceptor,
         })
     }
 
-    pub fn clone_session(&self) -> Arc<Session> {
-        Arc::new(Session {
+    pub fn clone_session(&self) -> Session {
+        Session {
             is_lan_connection: self.is_lan_connection,
+            is_secure: self.is_secure,
             is_authenticated: self.is_authenticated,
             username: self.username.clone(),
             peer_ip: self.peer_ip.clone(),
@@ -80,7 +89,8 @@ impl Session {
             command_channel_read: None,
 
             data_channel: Arc::clone(&self.data_channel), // Share the same socket
-        })
+            acceptor: self.acceptor.clone(),
+        }
     }
 
     pub async fn send(&self, data: &[u8]) -> Result<(), DriveError> {
@@ -129,9 +139,9 @@ impl Session {
             .first()
             .ok_or(DriveError::MissingParameter("missing user name parameter."))?;
 
-        if username == "admin" || username == "anonymous" {
+        if username == "pizzapizza100" {
             self.username = Some("admin".to_string());
-            debug!("Valid username, Sending \"331 User name okay, need password.\"");
+            debug!("Valid username");
             self.send(b"331 User name okay, need password.\r\n").await?;
         } else {
             debug!("Invalid username.");
@@ -159,7 +169,7 @@ impl Session {
             ));
         }
 
-        if password == "password" || password == "anonymous" {
+        if password == "pizzapizza100" {
             self.send(b"230 User logged in, proceed.\r\n").await?;
         } else {
             self.send(b"530 Invalid username.\r\n").await?;
@@ -203,7 +213,9 @@ impl Session {
 
         response.push_str("UTF8\r\n");
         response.push_str("PASV\r\n");
-        response.push_str("PASV\r\n");
+        response.push_str("AUTH TLS\r\n");
+        response.push_str("PBSZ\r\n");
+        response.push_str("PROT\r\n");
 
         response.push_str("211 End\r\n");
 
@@ -241,26 +253,25 @@ impl Session {
 
     pub async fn handle_rmd(&mut self, request: &FtpRequest) -> Result<(), DriveError> {
         // Expected format: " RMD <directory name>"
-        
+
         if request.parameters.is_empty() {
             return Err(DriveError::MissingParameter("missing file name parameter."));
         }
 
         let directory_path = request.parameters.join(" ");
-    
+
         debug!("Removing directory: {}", directory_path);
-    
+
         if let Err(e) = FilesHandler::remove_directory(&directory_path).await {
             self.send(b"550 Failed to remove directory.\r\n").await?;
             return Err(e);
         }
-    
+
         self.send(format!("250 \"{}\" removed.\r\n", directory_path).as_bytes())
             .await?;
-    
+
         Ok(())
     }
-    
 
     pub async fn handle_stor(&self, request: &FtpRequest) -> Result<(), DriveError> {
         if request.parameters.is_empty() {
@@ -287,13 +298,12 @@ impl Session {
 
         loop {
             // Wait for the socket to be readable
-            data_stream.readable().await?;
+            data_stream.get_ref().0.readable().await?;
 
-            // Try to read data, this may still fail with `WouldBlock`
-            // if the readiness event is a false positive.
-            let bytes_read = match data_stream.try_read(&mut buffer) {
+            let bytes_read = match data_stream.read(&mut buffer).await {
+                Ok(n) if n == 0 => break, // Connection closed
                 Ok(n) => n,
-                Err(ref e) if e.kind() == tokio::io::ErrorKind::WouldBlock => {
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     continue;
                 }
                 Err(e) => {
@@ -301,10 +311,6 @@ impl Session {
                     return Err(DriveError::FileSystem(format!("Error reading data: {}", e)));
                 }
             };
-
-            if bytes_read == 0 {
-                break;
-            }
 
             file.write_all(&buffer[..bytes_read]).await?;
         }
@@ -464,7 +470,8 @@ impl Session {
         );
 
         let (data_stream, data_addr) = listener.accept().await?;
-        *data_channel_locked = Some(data_stream);
+        let tls_stream = self.acceptor.accept(data_stream).await?;
+        *data_channel_locked = Some(tls_stream);
 
         debug!("{} connected to data socket", data_addr.ip());
 
@@ -532,11 +539,10 @@ impl Session {
     pub async fn handle_pwd(&self) -> Result<(), DriveError> {
         // Expected format: "PWD"
 
-        debug!("cwd: {}", self.cwd.display());
         let relative_path = self.cwd.display().to_string();
         let relative_path_display = match relative_path.as_str() {
             "" => "\\",
-            data => data,
+            path => path,
         };
 
         let response = format!("257 \"{}\" is the current directory.\r\n", relative_path);
@@ -580,10 +586,71 @@ impl Session {
         Ok(())
     }
 
-    pub async fn handle_exit(&self) -> Result<(), DriveError> {
+    pub async fn handle_prot(&self, request: &FtpRequest) -> Result<(), DriveError> {
+        // Expected format: "PROT <protocol mode>"
+
+        let protocol_mode =
+            request
+                .parameters
+                .first()
+                .map(String::as_str)
+                .ok_or(DriveError::MissingParameter(
+                    "missing protocol mode parameter.",
+                ))?;
+
+        match protocol_mode {
+            "P" => {
+                // private
+                self.send(b"200 PROT command successful\r\n").await?;
+            }
+            "C" => {
+                // clear
+                self.send(b"504 PROC must be P\r\n").await?;
+            }
+            _ => {
+                self.send(b"501 Command not implemented for that parameter\r\n")
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn handle_pbsz(&self, request: &FtpRequest) -> Result<(), DriveError> {
+        // Expected format: "PBSZ <size>"
+
+        let pbsz_size =
+            request
+                .parameters
+                .first()
+                .map(String::as_str)
+                .ok_or(DriveError::MissingParameter(
+                    "missing protocol mode parameter.",
+                ))?;
+
+        match pbsz_size {
+            "0" => {
+                self.send(b"200 PROT command successful.\r\n").await?;
+            }
+            _ => {
+                self.send(b"501 PBSZ must be 0\r\n").await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn handle_noop(&self) -> Result<(), DriveError> {
+        // Expected format: "NOOP"
+
+        self.send(b"200 Command okay.\r\n").await?;
+        Ok(())
+    }
+
+    pub async fn handle_quit(&self) -> Result<(), DriveError> {
         // Expected format: "Quit"
 
-        self.send(b"221 Goodbye").await?;
+        self.send(b"221 Goodbye\r\n").await?;
         Ok(())
     }
 }

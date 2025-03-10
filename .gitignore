@@ -9,3 +9,7 @@ secrets/
 .env
 
 DriveRoot/
+
+.idea/
+
+*.pem

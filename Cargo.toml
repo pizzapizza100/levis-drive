@@ -1,9 +1,10 @@
+# cspell:disable
+
 [package]
 name = "levis_drive"
 version = "0.1.0"
 edition = "2021"
 
-# cspell:ignore reqwest
 [dependencies]
 log = "0.4"
 env_logger = "0.11"
@@ -14,7 +15,10 @@ chrono = "0.4"
 rand = "0.8"
 tokio = { version = "1.43", features = ["full"] }
 thiserror = "1.0"
+tokio-postgres = "0.7"
+rustls = "0.21.0"
+rustls-pemfile = "2.0"
+tokio-rustls = "0.24"
 
-# cspell:ignore debuginfo
 [profile.release]
 strip = "debuginfo"
